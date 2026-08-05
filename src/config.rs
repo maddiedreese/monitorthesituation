@@ -13,6 +13,7 @@ ui:
   color: true
   fps: 10
   columns: auto          # auto, or a number such as 2
+  max_panes: 6           # visible at once; additional feeds use pages
   show_help: true
   ascii_ramp: " .:-=+*#%@"
 
@@ -52,6 +53,7 @@ pub struct UiConfig {
     pub color: bool,
     pub fps: u8,
     pub columns: Columns,
+    pub max_panes: u8,
     pub show_help: bool,
     pub ascii_ramp: String,
 }
@@ -63,6 +65,7 @@ impl Default for UiConfig {
             color: true,
             fps: 10,
             columns: Columns::Auto,
+            max_panes: 6,
             show_help: true,
             ascii_ramp: " .:-=+*#%@".into(),
         }
@@ -173,6 +176,9 @@ impl Config {
         }
         if !(1..=30).contains(&self.ui.fps) {
             bail!("ui.fps must be between 1 and 30");
+        }
+        if !(1..=36).contains(&self.ui.max_panes) {
+            bail!("ui.max_panes must be between 1 and 36");
         }
         if self.ui.ascii_ramp.chars().count() < 2 {
             bail!("ui.ascii_ramp needs at least two characters");

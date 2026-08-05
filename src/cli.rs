@@ -37,6 +37,9 @@ enum Commands {
         /// Override the automatic grid width
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         columns: Option<u16>,
+        /// Number of panes shown on one page (1–36)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=36))]
+        max_panes: Option<u8>,
         /// Ad-hoc stream URLs or local media paths
         inputs: Vec<String>,
     },
@@ -63,6 +66,7 @@ pub fn run(cli: Cli) -> Result<()> {
         mono: false,
         fps: None,
         columns: None,
+        max_panes: None,
         inputs: Vec::new(),
     }) {
         Commands::Run {
@@ -72,6 +76,7 @@ pub fn run(cli: Cli) -> Result<()> {
             mono,
             fps,
             columns,
+            max_panes,
             inputs,
         } => run_wall(
             config,
@@ -82,6 +87,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 mono,
                 fps,
                 columns,
+                max_panes,
             },
         ),
         Commands::Init { output, force } => init(output, force),
@@ -97,6 +103,7 @@ struct RunOverrides {
     mono: bool,
     fps: Option<u8>,
     columns: Option<u16>,
+    max_panes: Option<u8>,
 }
 
 fn run_wall(path: Option<PathBuf>, inputs: Vec<String>, overrides: RunOverrides) -> Result<()> {
@@ -134,6 +141,9 @@ fn run_wall(path: Option<PathBuf>, inputs: Vec<String>, overrides: RunOverrides)
     }
     if let Some(columns) = overrides.columns {
         config.ui.columns = crate::config::Columns::Fixed(columns);
+    }
+    if let Some(max_panes) = overrides.max_panes {
+        config.ui.max_panes = max_panes;
     }
     tui::run(config)
 }

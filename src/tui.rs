@@ -141,6 +141,19 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         app.stop();
         return;
     }
+    if app.show_settings {
+        match code {
+            KeyCode::Char('s') | KeyCode::Esc => app.show_settings = false,
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up => {
+                app.increase_max_panes()
+            }
+            KeyCode::Char('-') | KeyCode::Left | KeyCode::Down => app.decrease_max_panes(),
+            KeyCode::Char(']') | KeyCode::PageDown => app.next_page(),
+            KeyCode::Char('[') | KeyCode::PageUp => app.previous_page(),
+            _ => {}
+        }
+        return;
+    }
     if app.show_help {
         match code {
             KeyCode::Char('a') => app.open_source_entry(),
@@ -153,6 +166,9 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('a') => app.open_source_entry(),
         KeyCode::Char('x') => app.remove_selected(),
+        KeyCode::Char('s') => app.open_settings(),
+        KeyCode::Char(']') | KeyCode::PageDown => app.next_page(),
+        KeyCode::Char('[') | KeyCode::PageUp => app.previous_page(),
         KeyCode::Char('i') => app.show_details = !app.show_details,
         KeyCode::Char(' ') => app.toggle_pause(),
         KeyCode::Char('c') => app.config.ui.color = !app.config.ui.color,
@@ -205,6 +221,9 @@ fn draw(frame: &mut Frame, app: &App) {
     if app.adding_source {
         draw_source_entry(frame, app, area);
     }
+    if app.show_settings {
+        draw_settings(frame, app, area);
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -213,13 +232,25 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Renderer::Blocks => "BLOCKS",
     };
     let color = if app.config.ui.color { "COLOR" } else { "MONO" };
+    let page_size = usize::from(app.config.ui.max_panes);
+    let page_count = app.feeds.len().max(1).div_ceil(page_size);
+    let page = if app.feeds.is_empty() {
+        1
+    } else {
+        app.selected / page_size + 1
+    };
+    let page_label = if page_count > 1 {
+        format!("  ·  PAGE {page}/{page_count}")
+    } else {
+        String::new()
+    };
     let line = Line::from(vec![
         Span::styled(
             " MONITOR THE SITUATION ",
             chrome().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  {} FEED{}  ·  {renderer}  ·  {color}",
+            "  {} FEED{}  ·  {renderer}  ·  {color}{page_label}",
             app.feeds.len(),
             if app.feeds.len() == 1 { "" } else { "S" }
         )),
@@ -237,10 +268,13 @@ fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
-    let count = app.feeds.len().max(1);
+    let page_size = usize::from(app.config.ui.max_panes);
+    let page_start = (app.selected / page_size) * page_size;
+    let page_end = (page_start + page_size).min(app.feeds.len());
+    let count = page_end - page_start;
     let columns = match app.config.ui.columns {
         Columns::Fixed(value) => usize::from(value).min(count).max(1),
-        Columns::Auto => auto_columns(count, area),
+        Columns::Auto => auto_columns(count),
     };
     let rows = count.div_ceil(columns);
     let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
@@ -257,7 +291,7 @@ fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
             .constraints(constraints)
             .split(*row_area);
         for column in 0..items {
-            let index = start + column;
+            let index = page_start + start + column;
             if let Some(feed) = app.feeds.get(index) {
                 draw_feed(frame, app, feed, index, cells[column]);
             }
@@ -269,7 +303,15 @@ fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect
     let selected = index == app.selected;
     let border_color = if selected { Color::White } else { Color::Gray };
     let marker = if feed.paused { " PAUSED" } else { "" };
-    let display_name = feed.metadata.title.as_deref().unwrap_or(&feed.worker.name);
+    let display_name = if feed.automatic_name {
+        feed.metadata
+            .location
+            .as_deref()
+            .or(feed.metadata.title.as_deref())
+            .unwrap_or(&feed.worker.name)
+    } else {
+        &feed.worker.name
+    };
     let title = format!(" {}  {display_name}{marker} ", index + 1);
     let status = status_label(&feed.status, feed.measured_fps);
     let source_badge = source_badge(feed);
@@ -322,7 +364,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             chrome().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  a add  ·  x remove  ·  ? help  ·  space pause  ·  i info  ·  q quit",
+            "  a add  ·  x remove  ·  [ ] pages  ·  s settings  ·  i info  ·  q quit",
             chrome(),
         ),
     ]);
@@ -333,7 +375,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     let popup = centered(
         area,
         58.min(area.width.saturating_sub(4)),
-        20.min(area.height.saturating_sub(2)),
+        22.min(area.height.saturating_sub(2)),
     );
     frame.render_widget(Clear, popup);
     let help = [
@@ -344,6 +386,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         "  Space                  Pause selected feed",
         "  a                      Add a feed by URL or path",
         "  x                      Remove selected feed",
+        "  [ / ]                  Previous / next page",
+        "  s                      Visible-pane settings",
         "  r                      ASCII / block renderer",
         "  c                      Color / monochrome",
         "  i                      Feed details",
@@ -439,8 +483,8 @@ fn draw_source_entry(frame: &mut Frame, app: &App, area: Rect) {
     let input = tail_chars(&app.source_input, max_chars);
     let error = app.source_error.as_deref().unwrap_or("");
     let text = vec![
-        Line::from("Paste a direct HLS, RTSP, HTTP/MJPEG URL, webcam, or file path."),
-        Line::from(""),
+        Line::from("Paste a URL or path, optionally prefixed with a location:"),
+        Line::from("Location name | URL"),
         Line::from(vec![
             Span::styled("> ", chrome().add_modifier(Modifier::BOLD)),
             Span::styled(input, chrome()),
@@ -449,7 +493,7 @@ fn draw_source_entry(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(error, chrome())),
         Line::from(Span::styled(
-            "Enter add  ·  Esc cancel  ·  repeat a for more panes",
+            "Enter add  ·  Esc cancel  ·  URL alone also works",
             chrome(),
         )),
     ];
@@ -457,6 +501,28 @@ fn draw_source_entry(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(text).style(chrome()).block(
             Block::bordered()
                 .title(" ADD A FEED ")
+                .style(chrome())
+                .border_style(chrome()),
+        ),
+        popup,
+    );
+}
+
+fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(
+        area,
+        58.min(area.width.saturating_sub(4)),
+        11.min(area.height.saturating_sub(2)),
+    );
+    frame.render_widget(Clear, popup);
+    let text = format!(
+        "VISIBLE PANES\n\n  {} feeds per page\n\n  + / − or arrows        Change pane count (1–36)\n  [ / ]                  Move between pages\n  s or Esc               Close settings\n\nAdditional feeds remain active and appear on later pages.",
+        app.config.ui.max_panes
+    );
+    frame.render_widget(
+        Paragraph::new(text).style(chrome()).block(
+            Block::bordered()
+                .title(" SETTINGS ")
                 .style(chrome())
                 .border_style(chrome()),
         ),
@@ -509,12 +575,8 @@ fn status_label(status: &SourceStatus, fps: f32) -> String {
     }
 }
 
-fn auto_columns(count: usize, area: Rect) -> usize {
-    if count <= 1 {
-        return 1;
-    }
-    let terminal_ratio = f32::from(area.width) / f32::from(area.height.max(1) * 2);
-    ((count as f32 * terminal_ratio).sqrt().ceil() as usize).clamp(1, count)
+fn auto_columns(count: usize) -> usize {
+    (count as f32).sqrt().ceil() as usize
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -532,8 +594,10 @@ mod tests {
 
     #[test]
     fn automatic_grid_is_bounded() {
-        assert_eq!(auto_columns(1, Rect::new(0, 0, 100, 40)), 1);
-        assert!((1..=6).contains(&auto_columns(6, Rect::new(0, 0, 120, 40))));
+        assert_eq!(auto_columns(1), 1);
+        assert_eq!(auto_columns(4), 2);
+        assert_eq!(auto_columns(6), 3);
+        assert_eq!(auto_columns(9), 3);
     }
 
     #[test]

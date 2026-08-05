@@ -10,13 +10,15 @@ account, server, telemetry, recording, or bundled camera directory.
 ## What it does
 
 - Renders several sources simultaneously in one terminal window
-- Lets you paste and add feeds without leaving the viewer
+- Lets you paste and name feeds without leaving the viewer
 - Accepts HLS, RTSP, HTTP video, MJPEG, local video files, and USB webcams
 - Offers detailed Unicode half-blocks and classic ASCII rendering
 - Keeps the terminal chrome black with white text; video art can use true color
 - Supports color video and monochrome output
 - Reconnects interrupted sources with bounded backoff
 - Resizes dynamically with the terminal
+- Fills each pane with a centered crop instead of letterboxing
+- Shows six feeds per page by default, with configurable paging for larger walls
 - Keeps credentials out of configuration through environment variables
 - Decodes everything locally through FFmpeg
 - Shows sanitized source, protocol, codec, format, resolution, and frame-rate details
@@ -61,8 +63,10 @@ Start with an empty viewer:
 monitorthesituation
 ```
 
-Press `a`, paste a direct webcam stream URL, and press Enter. Press `a` again
-to add another feed; the viewer rearranges all panes automatically. URLs may be
+Press `a`, enter `Location name | URL`, and press Enter. The location becomes
+the pane title. Entering a URL by itself also works: the viewer uses an embedded
+location or title when the stream provides one, then falls back to its hostname.
+Press `a` again to add another feed, and the viewer rearranges the panes. URLs may be
 HLS (`.m3u8`), RTSP, direct HTTP video, or MJPEG streams. A webpage containing a
 video player is not itself a stream URL.
 
@@ -77,7 +81,7 @@ monitorthesituation run \
 Command-line options can temporarily override the configuration:
 
 ```sh
-monitorthesituation run --ascii --mono --fps 6 --columns 2 <URL> <URL>
+monitorthesituation run --ascii --mono --fps 6 --columns 2 --max-panes 8 <URL> <URL>
 ```
 
 Open a local webcam:
@@ -122,6 +126,7 @@ ui:
   color: true
   fps: 10                # 1–30
   columns: auto          # auto, or a fixed number
+  max_panes: 6           # visible at once; additional feeds use pages
   show_help: true
   ascii_ramp: " .:-=+*#%@"
 
@@ -164,6 +169,8 @@ They are never displayed in the interface or diagnostic messages.
 | `1`–`9` | Select a pane by number |
 | `a` | Paste and add another feed |
 | `x` | Remove the selected feed from this session |
+| `[` / `]`, `Page Up` / `Page Down` | Move between feed pages |
+| `s` | Change how many panes are visible (1–36) |
 | `Space` | Pause the selected image |
 | `r` | Toggle block/ASCII rendering |
 | `c` | Toggle color/monochrome |

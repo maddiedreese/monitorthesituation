@@ -14,6 +14,7 @@ pub struct Feed {
     pub measured_fps: f32,
     pub source: SourceConfig,
     pub metadata: StreamMetadata,
+    pub automatic_name: bool,
     fps_window_started: Instant,
     fps_window_frames: u32,
 }
@@ -24,6 +25,7 @@ pub struct App {
     pub selected: usize,
     pub show_help: bool,
     pub show_details: bool,
+    pub show_settings: bool,
     pub running: bool,
     pub adding_source: bool,
     pub source_input: String,
@@ -37,7 +39,7 @@ impl App {
             .sources
             .iter()
             .cloned()
-            .map(|source| Self::new_feed(source, config.ui.fps, now))
+            .map(|source| Self::new_feed(source, config.ui.fps, now, false))
             .collect();
         let show_help = config.ui.show_help;
         Self {
@@ -46,6 +48,7 @@ impl App {
             selected: 0,
             show_help,
             show_details: false,
+            show_settings: false,
             running: true,
             adding_source: false,
             source_input: String::new(),
@@ -53,7 +56,7 @@ impl App {
         }
     }
 
-    fn new_feed(source: SourceConfig, fps: u8, now: Instant) -> Feed {
+    fn new_feed(source: SourceConfig, fps: u8, now: Instant, automatic_name: bool) -> Feed {
         Feed {
             worker: SourceWorker::spawn(source.clone(), fps),
             frame: None,
@@ -63,6 +66,7 @@ impl App {
             measured_fps: 0.0,
             source,
             metadata: StreamMetadata::default(),
+            automatic_name,
             fps_window_started: now,
             fps_window_frames: 0,
         }
@@ -120,6 +124,7 @@ impl App {
     pub fn open_source_entry(&mut self) {
         self.show_help = false;
         self.show_details = false;
+        self.show_settings = false;
         self.adding_source = true;
         self.source_input.clear();
         self.source_error = None;
@@ -132,7 +137,12 @@ impl App {
     }
 
     pub fn submit_source(&mut self) {
-        let input = self.source_input.trim().to_owned();
+        let entered = self.source_input.trim();
+        let (custom_name, input) = entered
+            .split_once('|')
+            .map(|(name, input)| (Some(name.trim()), input.trim()))
+            .unwrap_or((None, entered));
+        let input = input.to_owned();
         if input.is_empty() {
             self.source_error = Some("Paste a direct stream URL or local media path.".into());
             return;
@@ -145,9 +155,19 @@ impl App {
             self.source_error = Some("The source cannot contain control characters.".into());
             return;
         }
+        if custom_name.is_some_and(|name| name.is_empty()) {
+            self.source_error = Some("Put a location name before |, or omit | entirely.".into());
+            return;
+        }
+        if custom_name.is_some_and(|name| name.chars().any(char::is_control)) {
+            self.source_error = Some("The location name cannot contain control characters.".into());
+            return;
+        }
         let index = self.feeds.len();
         let source = SourceConfig {
-            name: source_name(&input, index),
+            name: custom_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| source_name(&input, index)),
             kind: if input.starts_with("camera://") {
                 SourceKind::Camera
             } else {
@@ -160,6 +180,7 @@ impl App {
             source.clone(),
             self.config.ui.fps,
             Instant::now(),
+            custom_name.is_none(),
         ));
         self.config.sources.push(source);
         self.selected = self.feeds.len() - 1;
@@ -175,6 +196,47 @@ impl App {
         self.config.sources.remove(self.selected);
         self.selected = self.selected.min(self.feeds.len().saturating_sub(1));
         self.show_details = false;
+    }
+
+    pub fn open_settings(&mut self) {
+        self.show_help = false;
+        self.show_details = false;
+        self.show_settings = true;
+    }
+
+    pub fn increase_max_panes(&mut self) {
+        self.config.ui.max_panes = self.config.ui.max_panes.saturating_add(1).min(36);
+    }
+
+    pub fn decrease_max_panes(&mut self) {
+        self.config.ui.max_panes = self.config.ui.max_panes.saturating_sub(1).max(1);
+        if !self.feeds.is_empty() {
+            let page_size = usize::from(self.config.ui.max_panes);
+            self.selected = (self.selected / page_size) * page_size;
+            self.selected = self.selected.min(self.feeds.len() - 1);
+        }
+    }
+
+    pub fn next_page(&mut self) {
+        if self.feeds.is_empty() {
+            return;
+        }
+        let page_size = usize::from(self.config.ui.max_panes);
+        let next = (self.selected / page_size + 1) * page_size;
+        self.selected = if next < self.feeds.len() { next } else { 0 };
+    }
+
+    pub fn previous_page(&mut self) {
+        if self.feeds.is_empty() {
+            return;
+        }
+        let page_size = usize::from(self.config.ui.max_panes);
+        let page = self.selected / page_size;
+        self.selected = if page == 0 {
+            ((self.feeds.len() - 1) / page_size) * page_size
+        } else {
+            (page - 1) * page_size
+        };
     }
 
     pub fn stop(&mut self) {

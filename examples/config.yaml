@@ -5,6 +5,7 @@ ui:
   color: true
   fps: 10
   columns: auto
+  max_panes: 6
   show_help: true
   ascii_ramp: " .:-=+*#%@"
 
@@ -20,4 +21,3 @@ sources:
   - name: Local webcam
     kind: camera
     input: camera://0
-
