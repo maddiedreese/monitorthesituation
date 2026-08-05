@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    config::{Config, DEFAULT_CONFIG, SourceConfig, SourceKind},
+    config::{Config, DEFAULT_CONFIG, SourceConfig, SourceKind, source_name},
     media, tui,
 };
 
@@ -110,7 +110,7 @@ fn run_wall(path: Option<PathBuf>, inputs: Vec<String>, overrides: RunOverrides)
     };
     for (index, input) in inputs.into_iter().enumerate() {
         config.sources.push(SourceConfig {
-            name: display_name(&input, index),
+            name: source_name(&input, index),
             kind: if input.starts_with("camera://") {
                 SourceKind::Camera
             } else {
@@ -134,11 +134,6 @@ fn run_wall(path: Option<PathBuf>, inputs: Vec<String>, overrides: RunOverrides)
     }
     if let Some(columns) = overrides.columns {
         config.ui.columns = crate::config::Columns::Fixed(columns);
-    }
-    if config.sources.is_empty() {
-        bail!(
-            "no sources configured\n\nRun `monitorthesituation init`, add a source, then run again;\nor pass a source directly: `monitorthesituation run <URL>`"
-        );
     }
     tui::run(config)
 }
@@ -223,16 +218,4 @@ fn doctor() -> Result<()> {
 
 fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|path| path.join("monitorthesituation/config.yaml"))
-}
-
-fn display_name(input: &str, index: usize) -> String {
-    if let Some(device) = input.strip_prefix("camera://") {
-        return format!("Camera {device}");
-    }
-    PathBuf::from(input)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Situation {}", index + 1))
 }

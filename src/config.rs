@@ -127,6 +127,12 @@ pub struct SourceConfig {
     pub headers: BTreeMap<String, String>,
 }
 
+impl SourceConfig {
+    pub fn display_input(&self) -> String {
+        sanitized_input(&self.input)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
@@ -175,8 +181,14 @@ impl Config {
             if source.name.trim().is_empty() {
                 bail!("sources[{index}].name cannot be empty");
             }
+            if source.name.chars().any(char::is_control) {
+                bail!("sources[{index}].name cannot contain control characters");
+            }
             if source.input.trim().is_empty() {
                 bail!("sources[{index}].input cannot be empty");
+            }
+            if source.input.chars().any(char::is_control) {
+                bail!("sources[{index}].input cannot contain control characters");
             }
             for key in source.headers.keys() {
                 if key.contains(['\r', '\n']) {
@@ -215,6 +227,45 @@ pub fn expand_environment(input: &str) -> Result<String> {
     Ok(output)
 }
 
+pub fn source_name(input: &str, index: usize) -> String {
+    if let Some(device) = input.strip_prefix("camera://") {
+        return format!("Camera {device}");
+    }
+    if let Some((_, rest)) = input.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        if !host.is_empty() {
+            return host.to_owned();
+        }
+    }
+    Path::new(input)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Situation {}", index + 1))
+}
+
+pub fn sanitized_input(input: &str) -> String {
+    if input.starts_with("camera://") {
+        return input.to_owned();
+    }
+    if let Some((scheme, rest)) = input.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        return if host.is_empty() {
+            format!("{scheme}://…")
+        } else {
+            format!("{scheme}://{host}/…")
+        };
+    }
+    Path::new(input)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("local file")
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +298,12 @@ mod tests {
             expand_environment("https://example.com/a#b").unwrap(),
             "https://example.com/a#b"
         );
+    }
+
+    #[test]
+    fn source_display_hides_credentials_and_query_tokens() {
+        let input = "https://person:password@camera.example/live.m3u8?token=secret";
+        assert_eq!(sanitized_input(input), "https://camera.example/…");
+        assert_eq!(source_name(input, 0), "camera.example");
     }
 }

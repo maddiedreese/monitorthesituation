@@ -10,13 +10,16 @@ account, server, telemetry, recording, or bundled camera directory.
 ## What it does
 
 - Renders several sources simultaneously in one terminal window
+- Lets you paste and add feeds without leaving the viewer
 - Accepts HLS, RTSP, HTTP video, MJPEG, local video files, and USB webcams
 - Offers detailed Unicode half-blocks and classic ASCII rendering
-- Supports true color and monochrome output
+- Keeps the terminal chrome black with white text; video art can use true color
+- Supports color video and monochrome output
 - Reconnects interrupted sources with bounded backoff
 - Resizes dynamically with the terminal
 - Keeps credentials out of configuration through environment variables
 - Decodes everything locally through FFmpeg
+- Shows sanitized source, protocol, codec, format, resolution, and frame-rate details
 
 ## Requirements
 
@@ -51,6 +54,17 @@ cargo install --path .
 During development, use `cargo run --` in place of `monitorthesituation`.
 
 ## Quick start
+
+Start with an empty viewer:
+
+```sh
+monitorthesituation
+```
+
+Press `a`, paste a direct webcam stream URL, and press Enter. Press `a` again
+to add another feed; the viewer rearranges all panes automatically. URLs may be
+HLS (`.m3u8`), RTSP, direct HTTP video, or MJPEG streams. A webpage containing a
+video player is not itself a stream URL.
 
 Open one or more authorized streams directly:
 
@@ -148,10 +162,12 @@ They are never displayed in the interface or diagnostic messages.
 |---|---|
 | `Tab`, arrows, `h/j/k/l` | Select a pane |
 | `1`–`9` | Select a pane by number |
+| `a` | Paste and add another feed |
+| `x` | Remove the selected feed from this session |
 | `Space` | Pause the selected image |
 | `r` | Toggle block/ASCII rendering |
 | `c` | Toggle color/monochrome |
-| `i` | Show feed diagnostics |
+| `i` | Show source and video-stream information |
 | `?` | Show help |
 | `q`, `Ctrl-C` | Quit |
 
@@ -173,9 +189,12 @@ permission from the camera operator. See [docs/CAMERA_PERMISSION.md](docs/CAMERA
 
 ## Privacy
 
-Frames move directly from FFmpeg into terminal memory. The application does not
-record them, write them to disk, inspect their contents, or send them elsewhere.
-Pausing a pane freezes its latest in-memory frame while decoding continues.
+Frames move directly from FFmpeg into terminal memory. FFprobe reads technical
+stream metadata from the same source for the information panel. The application
+does not record frames, write them to disk, inspect their contents, or send them
+elsewhere. Pausing a pane freezes its latest in-memory frame while decoding
+continues. Source locations shown in the interface omit URL credentials, paths,
+query strings, and fragments.
 
 ## Development
 

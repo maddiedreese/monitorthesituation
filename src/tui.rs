@@ -6,9 +6,16 @@ use std::{
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    style::{Color as CrosstermColor, ResetColor, SetBackgroundColor, SetForegroundColor},
+    terminal::{
+        Clear as ClearTerminal, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode,
+    },
 };
 use ratatui::{
     Frame, Terminal,
@@ -39,11 +46,17 @@ pub fn run(config: Config) -> Result<()> {
     while app.running {
         app.update();
         terminal.terminal.draw(|frame| draw(frame, &app))?;
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind != KeyEventKind::Release
-        {
-            handle_key(&mut app, key.code, key.modifiers);
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    handle_key(&mut app, key.code, key.modifiers);
+                }
+                Event::Paste(value) if app.adding_source => {
+                    app.source_input.push_str(&value);
+                    app.source_error = None;
+                }
+                _ => {}
+            }
         }
     }
     app.stop();
@@ -58,7 +71,15 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            SetBackgroundColor(CrosstermColor::Black),
+            SetForegroundColor(CrosstermColor::White),
+            ClearTerminal(ClearType::All),
+            Hide
+        ) {
             let _ = disable_raw_mode();
             return Err(error.into());
         }
@@ -67,7 +88,13 @@ impl TerminalGuard {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, Show, LeaveAlternateScreen);
+                let _ = execute!(
+                    stdout,
+                    ResetColor,
+                    Show,
+                    DisableBracketedPaste,
+                    LeaveAlternateScreen
+                );
                 return Err(error.into());
             }
         };
@@ -78,7 +105,13 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            ResetColor,
+            Show,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -88,18 +121,38 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         app.stop();
         return;
     }
+    if app.adding_source {
+        match code {
+            KeyCode::Esc => app.cancel_source_entry(),
+            KeyCode::Enter => app.submit_source(),
+            KeyCode::Backspace => {
+                app.source_input.pop();
+                app.source_error = None;
+            }
+            KeyCode::Char(character) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                app.source_input.push(character);
+                app.source_error = None;
+            }
+            _ => {}
+        }
+        return;
+    }
     if code == KeyCode::Char('q') {
         app.stop();
         return;
     }
     if app.show_help {
-        if matches!(code, KeyCode::Char('?') | KeyCode::Esc) {
-            app.show_help = false;
+        match code {
+            KeyCode::Char('a') => app.open_source_entry(),
+            KeyCode::Char('?') | KeyCode::Esc => app.show_help = false,
+            _ => {}
         }
         return;
     }
     match code {
         KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('a') => app.open_source_entry(),
+        KeyCode::Char('x') => app.remove_selected(),
         KeyCode::Char('i') => app.show_details = !app.show_details,
         KeyCode::Char(' ') => app.toggle_pause(),
         KeyCode::Char('c') => app.config.ui.color = !app.config.ui.color,
@@ -124,11 +177,12 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    frame.render_widget(Block::default().style(chrome()), area);
     if area.width < 30 || area.height < 8 {
         frame.render_widget(
             Paragraph::new("Terminal too small\nResize to at least 30 × 8")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Yellow)),
+                .style(chrome()),
             area,
         );
         return;
@@ -148,6 +202,9 @@ fn draw(frame: &mut Frame, app: &App) {
     if app.show_details {
         draw_details(frame, app, area);
     }
+    if app.adding_source {
+        draw_source_entry(frame, app, area);
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -159,10 +216,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             " MONITOR THE SITUATION ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
+            chrome().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
             "  {} FEED{}  ·  {renderer}  ·  {color}",
@@ -174,6 +228,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
+    if app.feeds.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No feeds yet\n\nPress a to add a live stream, webcam, or video file")
+                .alignment(Alignment::Center)
+                .style(chrome()),
+            area,
+        );
+        return;
+    }
     let count = app.feeds.len().max(1);
     let columns = match app.config.ui.columns {
         Columns::Fixed(value) => usize::from(value).min(count).max(1),
@@ -204,14 +267,12 @@ fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect) {
     let selected = index == app.selected;
-    let border_color = if selected {
-        Color::LightGreen
-    } else {
-        Color::DarkGray
-    };
+    let border_color = if selected { Color::White } else { Color::Gray };
     let marker = if feed.paused { " PAUSED" } else { "" };
-    let title = format!(" {}  {}{} ", index + 1, feed.worker.name, marker);
+    let display_name = feed.metadata.title.as_deref().unwrap_or(&feed.worker.name);
+    let title = format!(" {}  {display_name}{marker} ", index + 1);
     let status = status_label(&feed.status, feed.measured_fps);
+    let source_badge = source_badge(feed);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color).add_modifier(if selected {
@@ -219,11 +280,8 @@ fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect
         } else {
             Modifier::empty()
         }))
-        .title(Line::from(title).style(Style::default().fg(if selected {
-            Color::LightGreen
-        } else {
-            Color::Gray
-        })))
+        .title(Line::from(title).style(chrome()))
+        .title_bottom(Line::from(format!(" {source_badge} ")).style(chrome()))
         .title_bottom(Line::from(format!(" {status} ")).alignment(Alignment::Right));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -246,7 +304,7 @@ fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect
             Paragraph::new(text)
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true })
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(chrome()),
             inner,
         );
     }
@@ -261,11 +319,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             format!(" {selected} "),
-            Style::default().fg(Color::LightGreen),
+            chrome().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  ? help  ·  space pause  ·  r render  ·  c color  ·  q quit",
-            Style::default().fg(Color::DarkGray),
+            "  a add  ·  x remove  ·  ? help  ·  space pause  ·  i info  ·  q quit",
+            chrome(),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -275,7 +333,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     let popup = centered(
         area,
         58.min(area.width.saturating_sub(4)),
-        18.min(area.height.saturating_sub(2)),
+        20.min(area.height.saturating_sub(2)),
     );
     frame.render_widget(Clear, popup);
     let help = [
@@ -284,6 +342,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         "  Tab / arrows / hjkl   Select a feed",
         "  1–9                    Select feed by number",
         "  Space                  Pause selected feed",
+        "  a                      Add a feed by URL or path",
+        "  x                      Remove selected feed",
         "  r                      ASCII / block renderer",
         "  c                      Color / monochrome",
         "  i                      Feed details",
@@ -295,10 +355,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     .join("\n");
     frame.render_widget(
         Paragraph::new(help)
+            .style(chrome())
             .block(
                 Block::bordered()
                     .title(" HELP ")
-                    .border_style(Style::default().fg(Color::LightGreen)),
+                    .style(chrome())
+                    .border_style(chrome()),
             )
             .wrap(Wrap { trim: false }),
         popup,
@@ -312,7 +374,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered(
         area,
         62.min(area.width.saturating_sub(4)),
-        10.min(area.height.saturating_sub(2)),
+        18.min(area.height.saturating_sub(2)),
     );
     frame.render_widget(Clear, popup);
     let age = feed
@@ -325,9 +387,30 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .map(|value| value.sequence.to_string())
         .unwrap_or_else(|| "—".into());
+    let native_size = match (feed.metadata.width, feed.metadata.height) {
+        (Some(width), Some(height)) => format!("{width} × {height}"),
+        _ => "detecting…".into(),
+    };
+    let native_fps = feed
+        .metadata
+        .fps
+        .map(|fps| format!("{fps:.2} fps"))
+        .unwrap_or_else(|| "detecting…".into());
+    let embedded_title = feed.metadata.title.as_deref().unwrap_or("—");
+    let location = feed.metadata.location.as_deref().unwrap_or("—");
+    let description = feed.metadata.description.as_deref().unwrap_or("—");
     let text = format!(
-        "Name: {}\nStatus: {}\nFrames received: {}\nCurrent sequence: {}\nFrame age: {}\nMeasured rate: {:.1} fps",
+        "Name: {}\nEmbedded title: {}\nLocation: {}\nDescription: {}\nSource: {}\nKind: {:?}\nFormat: {}\nCodec: {}\nNative video: {} · {}\nStatus: {}\nFrames received: {}\nCurrent sequence: {}\nFrame age: {}\nRendered rate: {:.1} fps",
         feed.worker.name,
+        embedded_title,
+        location,
+        description,
+        feed.source.display_input(),
+        feed.source.kind,
+        feed.metadata.format.as_deref().unwrap_or("detecting…"),
+        feed.metadata.codec.as_deref().unwrap_or("detecting…"),
+        native_size,
+        native_fps,
         status_label(&feed.status, feed.measured_fps),
         feed.frames_seen,
         sequence,
@@ -335,13 +418,85 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
         feed.measured_fps,
     );
     frame.render_widget(
-        Paragraph::new(text).block(
+        Paragraph::new(text).style(chrome()).block(
             Block::bordered()
                 .title(" FEED DETAILS · i to close ")
-                .border_style(Style::default().fg(Color::LightGreen)),
+                .style(chrome())
+                .border_style(chrome()),
         ),
         popup,
     );
+}
+
+fn draw_source_entry(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(
+        area,
+        72.min(area.width.saturating_sub(4)),
+        9.min(area.height.saturating_sub(2)),
+    );
+    frame.render_widget(Clear, popup);
+    let max_chars = usize::from(popup.width.saturating_sub(6));
+    let input = tail_chars(&app.source_input, max_chars);
+    let error = app.source_error.as_deref().unwrap_or("");
+    let text = vec![
+        Line::from("Paste a direct HLS, RTSP, HTTP/MJPEG URL, webcam, or file path."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> ", chrome().add_modifier(Modifier::BOLD)),
+            Span::styled(input, chrome()),
+            Span::styled("▏", chrome().add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(error, chrome())),
+        Line::from(Span::styled(
+            "Enter add  ·  Esc cancel  ·  repeat a for more panes",
+            chrome(),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(text).style(chrome()).block(
+            Block::bordered()
+                .title(" ADD A FEED ")
+                .style(chrome())
+                .border_style(chrome()),
+        ),
+        popup,
+    );
+}
+
+fn tail_chars(value: &str, limit: usize) -> String {
+    let count = value.chars().count();
+    if count <= limit {
+        value.to_owned()
+    } else {
+        format!(
+            "…{}",
+            value
+                .chars()
+                .skip(count - limit.saturating_sub(1))
+                .collect::<String>()
+        )
+    }
+}
+
+fn source_badge(feed: &Feed) -> String {
+    let protocol = if feed.source.input.starts_with("camera://") {
+        "CAMERA"
+    } else if let Some((scheme, _)) = feed.source.input.split_once("://") {
+        scheme
+    } else {
+        "FILE"
+    };
+    let metadata = feed.metadata.compact();
+    if metadata.is_empty() {
+        protocol.to_uppercase()
+    } else {
+        format!("{} · {metadata}", protocol.to_uppercase())
+    }
+}
+
+fn chrome() -> Style {
+    Style::default().fg(Color::White).bg(Color::Black)
 }
 
 fn status_label(status: &SourceStatus, fps: f32) -> String {
@@ -401,6 +556,14 @@ mod tests {
         config.ui.show_help = false;
         let mut app = App::new(config);
         handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn add_feed_opens_directly_from_startup_help() {
+        let mut app = App::new(Config::default());
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(app.adding_source);
         assert!(!app.show_help);
     }
 }

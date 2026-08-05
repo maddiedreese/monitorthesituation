@@ -40,7 +40,7 @@ impl VideoWidget<'_> {
                 let foreground = if self.color {
                     rgb_color(rgb)
                 } else {
-                    gray_color(luminance)
+                    Color::White
                 };
                 buffer[(area.x + offset_x + col, area.y + offset_y + row)]
                     .set_char(ramp[index])

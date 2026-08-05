@@ -31,6 +31,32 @@ pub struct VideoFrame {
 pub enum MediaEvent {
     Frame(VideoFrame),
     Status(SourceStatus),
+    Metadata(StreamMetadata),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamMetadata {
+    pub title: Option<String>,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub codec: Option<String>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub fps: Option<f32>,
+    pub format: Option<String>,
+}
+
+impl StreamMetadata {
+    pub fn compact(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(codec) = &self.codec {
+            parts.push(codec.to_uppercase());
+        }
+        if let (Some(width), Some(height)) = (self.width, self.height) {
+            parts.push(format!("{width}×{height}"));
+        }
+        parts.join(" · ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +89,15 @@ impl SourceWorker {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let name = source.name.clone();
+        let metadata_source = source.clone();
+        let metadata_sender = sender.clone();
+        let _ = thread::Builder::new()
+            .name(format!("metadata-{}", slug(&name)))
+            .spawn(move || {
+                if let Some(metadata) = probe_metadata(&metadata_source) {
+                    let _ = metadata_sender.send(MediaEvent::Metadata(metadata));
+                }
+            });
         let thread = thread::Builder::new()
             .name(format!("source-{}", slug(&name)))
             .spawn(move || worker_loop(source, fps, sender, thread_stop))
@@ -80,6 +115,76 @@ impl SourceWorker {
         // Closing the UI breaks FFmpeg's stdout pipe. We deliberately avoid a
         // blocking join here because a remote socket can take time to unwind.
         self.thread.take();
+    }
+}
+
+fn probe_metadata(source: &SourceConfig) -> Option<StreamMetadata> {
+    if source.kind == SourceKind::Camera || source.input.starts_with("camera://") {
+        return None;
+    }
+    let resolved = resolve_input(&source.input, source.kind).ok()?;
+    let mut command = Command::new("ffprobe");
+    command.args([
+        "-v",
+        "error",
+        "-rw_timeout",
+        "8000000",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,width,height,avg_frame_rate:stream_tags=title:format=format_name:format_tags=title,location,comment,description",
+        "-of",
+        "default=noprint_wrappers=1",
+    ]);
+    command.args(&resolved.input_args);
+    if !source.headers.is_empty() {
+        let headers = source
+            .headers
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}\r\n"))
+            .collect::<String>();
+        command.args(["-headers", &headers]);
+    }
+    let output = command.arg(&resolved.input).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut metadata = StreamMetadata::default();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "codec_name" => metadata.codec = clean_metadata(value),
+            "width" => metadata.width = value.parse().ok(),
+            "height" => metadata.height = value.parse().ok(),
+            "avg_frame_rate" => metadata.fps = parse_rate(value),
+            "format_name" => metadata.format = clean_metadata(value),
+            "TAG:title" if metadata.title.is_none() => metadata.title = clean_metadata(value),
+            "TAG:location" => metadata.location = clean_metadata(value),
+            "TAG:comment" | "TAG:description" => metadata.description = clean_metadata(value),
+            _ => {}
+        }
+    }
+    Some(metadata)
+}
+
+fn clean_metadata(value: &str) -> Option<String> {
+    let value = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(160)
+        .collect::<String>();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn parse_rate(value: &str) -> Option<f32> {
+    if let Some((numerator, denominator)) = value.split_once('/') {
+        let numerator: f32 = numerator.parse().ok()?;
+        let denominator: f32 = denominator.parse().ok()?;
+        (denominator != 0.0).then_some(numerator / denominator)
+    } else {
+        value.parse().ok()
     }
 }
 
@@ -383,5 +488,19 @@ mod tests {
     #[test]
     fn rejects_empty_camera() {
         assert!(resolve_input("camera://", SourceKind::Camera).is_err());
+    }
+
+    #[test]
+    fn parses_fractional_frame_rate() {
+        assert_eq!(parse_rate("30000/1001").unwrap().round(), 30.0);
+        assert!(parse_rate("0/0").is_none());
+    }
+
+    #[test]
+    fn metadata_text_cannot_inject_terminal_controls() {
+        assert_eq!(
+            clean_metadata("City\u{1b}[2J Camera").unwrap(),
+            "City[2J Camera"
+        );
     }
 }
