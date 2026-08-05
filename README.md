@@ -1,6 +1,6 @@
 # monitorthesituation
 
-Turn live video into a quiet, slightly ominous wall of terminal art.
+Monitor any situation you want, directly from your terminal, through video feeds rendered in ASCII.
 
 `monitorthesituation` runs entirely inside your existing terminal. It opens an
 alternate screen, arranges your feeds into an adaptive grid, and restores the
