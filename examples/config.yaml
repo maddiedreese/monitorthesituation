@@ -1,0 +1,23 @@
+version: 1
+
+ui:
+  renderer: blocks
+  color: true
+  fps: 10
+  columns: auto
+  show_help: true
+  ascii_ramp: " .:-=+*#%@"
+
+sources:
+  - name: Example HLS stream
+    kind: stream
+    input: ${HLS_STREAM_URL}
+
+  - name: Example RTSP camera
+    kind: stream
+    input: ${RTSP_CAMERA_URL}
+
+  - name: Local webcam
+    kind: camera
+    input: camera://0
+

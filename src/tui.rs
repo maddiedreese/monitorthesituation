@@ -1,0 +1,406 @@
+use std::{
+    io::{self, IsTerminal, Stdout},
+    time::Duration,
+};
+
+use anyhow::Result;
+use crossterm::{
+    cursor::{Hide, Show},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+};
+
+use crate::{
+    app::{App, Feed},
+    config::{Columns, Config, Renderer},
+    media::SourceStatus,
+    render::VideoWidget,
+};
+
+type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+pub fn run(config: Config) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!(
+            "the interactive interface needs a terminal; run it directly instead of piping its output"
+        );
+    }
+    let mut terminal = TerminalGuard::enter()?;
+    let mut app = App::new(config);
+    while app.running {
+        app.update();
+        terminal.terminal.draw(|frame| draw(frame, &app))?;
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind != KeyEventKind::Release
+        {
+            handle_key(&mut app, key.code, key.modifiers);
+        }
+    }
+    app.stop();
+    Ok(())
+}
+
+struct TerminalGuard {
+    terminal: Tui,
+}
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+            let _ = disable_raw_mode();
+            return Err(error.into());
+        }
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = disable_raw_mode();
+                let mut stdout = io::stdout();
+                let _ = execute!(stdout, Show, LeaveAlternateScreen);
+                return Err(error.into());
+            }
+        };
+        Ok(Self { terminal })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+        app.stop();
+        return;
+    }
+    if code == KeyCode::Char('q') {
+        app.stop();
+        return;
+    }
+    if app.show_help {
+        if matches!(code, KeyCode::Char('?') | KeyCode::Esc) {
+            app.show_help = false;
+        }
+        return;
+    }
+    match code {
+        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('i') => app.show_details = !app.show_details,
+        KeyCode::Char(' ') => app.toggle_pause(),
+        KeyCode::Char('c') => app.config.ui.color = !app.config.ui.color,
+        KeyCode::Char('r') => app.toggle_renderer(),
+        KeyCode::Tab | KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j') => {
+            app.next()
+        }
+        KeyCode::BackTab
+        | KeyCode::Left
+        | KeyCode::Up
+        | KeyCode::Char('h')
+        | KeyCode::Char('k') => app.previous(),
+        KeyCode::Char(number @ '1'..='9') => {
+            let index = usize::from(number as u8 - b'1');
+            if index < app.feeds.len() {
+                app.selected = index;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn draw(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    if area.width < 30 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Terminal too small\nResize to at least 30 × 8")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Yellow)),
+            area,
+        );
+        return;
+    }
+    let vertical = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    draw_header(frame, app, vertical[0]);
+    draw_grid(frame, app, vertical[1]);
+    draw_footer(frame, app, vertical[2]);
+    if app.show_help {
+        draw_help(frame, area);
+    }
+    if app.show_details {
+        draw_details(frame, app, area);
+    }
+}
+
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let renderer = match app.config.ui.renderer {
+        Renderer::Ascii => "ASCII",
+        Renderer::Blocks => "BLOCKS",
+    };
+    let color = if app.config.ui.color { "COLOR" } else { "MONO" };
+    let line = Line::from(vec![
+        Span::styled(
+            " MONITOR THE SITUATION ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "  {} FEED{}  ·  {renderer}  ·  {color}",
+            app.feeds.len(),
+            if app.feeds.len() == 1 { "" } else { "S" }
+        )),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
+    let count = app.feeds.len().max(1);
+    let columns = match app.config.ui.columns {
+        Columns::Fixed(value) => usize::from(value).min(count).max(1),
+        Columns::Auto => auto_columns(count, area),
+    };
+    let rows = count.div_ceil(columns);
+    let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(area);
+    for (row, row_area) in row_areas.iter().enumerate() {
+        let start = row * columns;
+        let items = (count - start).min(columns);
+        let constraints = vec![Constraint::Ratio(1, columns as u32); columns];
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(constraints)
+            .split(*row_area);
+        for column in 0..items {
+            let index = start + column;
+            if let Some(feed) = app.feeds.get(index) {
+                draw_feed(frame, app, feed, index, cells[column]);
+            }
+        }
+    }
+}
+
+fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect) {
+    let selected = index == app.selected;
+    let border_color = if selected {
+        Color::LightGreen
+    } else {
+        Color::DarkGray
+    };
+    let marker = if feed.paused { " PAUSED" } else { "" };
+    let title = format!(" {}  {}{} ", index + 1, feed.worker.name, marker);
+    let status = status_label(&feed.status, feed.measured_fps);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color).add_modifier(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        }))
+        .title(Line::from(title).style(Style::default().fg(if selected {
+            Color::LightGreen
+        } else {
+            Color::Gray
+        })))
+        .title_bottom(Line::from(format!(" {status} ")).alignment(Alignment::Right));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if let Some(video) = &feed.frame {
+        frame.render_widget(
+            VideoWidget {
+                frame: video,
+                renderer: app.config.ui.renderer,
+                color: app.config.ui.color,
+                ramp: &app.config.ui.ascii_ramp,
+            },
+            inner,
+        );
+    } else {
+        let text = match &feed.status {
+            SourceStatus::Failed(message) => format!("Waiting to reconnect…\n{message}"),
+            _ => "Connecting…".into(),
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    }
+}
+
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let selected = app
+        .feeds
+        .get(app.selected)
+        .map(|feed| feed.worker.name.as_str())
+        .unwrap_or("—");
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" {selected} "),
+            Style::default().fg(Color::LightGreen),
+        ),
+        Span::styled(
+            "  ? help  ·  space pause  ·  r render  ·  c color  ·  q quit",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let popup = centered(
+        area,
+        58.min(area.width.saturating_sub(4)),
+        18.min(area.height.saturating_sub(2)),
+    );
+    frame.render_widget(Clear, popup);
+    let help = [
+        "KEYBOARD",
+        "",
+        "  Tab / arrows / hjkl   Select a feed",
+        "  1–9                    Select feed by number",
+        "  Space                  Pause selected feed",
+        "  r                      ASCII / block renderer",
+        "  c                      Color / monochrome",
+        "  i                      Feed details",
+        "  ? or Esc               Close this help",
+        "  q or Ctrl-C            Quit",
+        "",
+        "Streams are decoded locally. Nothing is uploaded or recorded.",
+    ]
+    .join("\n");
+    frame.render_widget(
+        Paragraph::new(help)
+            .block(
+                Block::bordered()
+                    .title(" HELP ")
+                    .border_style(Style::default().fg(Color::LightGreen)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(feed) = app.feeds.get(app.selected) else {
+        return;
+    };
+    let popup = centered(
+        area,
+        62.min(area.width.saturating_sub(4)),
+        10.min(area.height.saturating_sub(2)),
+    );
+    frame.render_widget(Clear, popup);
+    let age = feed
+        .frame
+        .as_ref()
+        .map(|value| format!("{:.1}s", value.received_at.elapsed().as_secs_f32()))
+        .unwrap_or_else(|| "—".into());
+    let sequence = feed
+        .frame
+        .as_ref()
+        .map(|value| value.sequence.to_string())
+        .unwrap_or_else(|| "—".into());
+    let text = format!(
+        "Name: {}\nStatus: {}\nFrames received: {}\nCurrent sequence: {}\nFrame age: {}\nMeasured rate: {:.1} fps",
+        feed.worker.name,
+        status_label(&feed.status, feed.measured_fps),
+        feed.frames_seen,
+        sequence,
+        age,
+        feed.measured_fps,
+    );
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::bordered()
+                .title(" FEED DETAILS · i to close ")
+                .border_style(Style::default().fg(Color::LightGreen)),
+        ),
+        popup,
+    );
+}
+
+fn status_label(status: &SourceStatus, fps: f32) -> String {
+    match status {
+        SourceStatus::Connecting => "CONNECTING".into(),
+        SourceStatus::Live => format!("LIVE  {fps:.1} FPS"),
+        SourceStatus::Reconnecting => "RECONNECTING".into(),
+        SourceStatus::Failed(_) => "OFFLINE".into(),
+        SourceStatus::Stopped => "STOPPED".into(),
+    }
+}
+
+fn auto_columns(count: usize, area: Rect) -> usize {
+    if count <= 1 {
+        return 1;
+    }
+    let terminal_ratio = f32::from(area.width) / f32::from(area.height.max(1) * 2);
+    ((count as f32 * terminal_ratio).sqrt().ceil() as usize).clamp(1, count)
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_grid_is_bounded() {
+        assert_eq!(auto_columns(1, Rect::new(0, 0, 100, 40)), 1);
+        assert!((1..=6).contains(&auto_columns(6, Rect::new(0, 0, 120, 40))));
+    }
+
+    #[test]
+    fn centered_rectangle_stays_inside() {
+        let result = centered(Rect::new(2, 3, 80, 20), 40, 10);
+        assert_eq!(result, Rect::new(22, 8, 40, 10));
+    }
+
+    #[test]
+    fn quit_is_available_while_help_is_open() {
+        let mut app = App::new(Config::default());
+        assert!(app.show_help);
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn vim_left_key_does_not_open_help() {
+        let mut config = Config::default();
+        config.ui.show_help = false;
+        let mut app = App::new(config);
+        handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(!app.show_help);
+    }
+}
