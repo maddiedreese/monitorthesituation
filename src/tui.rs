@@ -11,7 +11,7 @@ use crossterm::{
         KeyModifiers,
     },
     execute,
-    style::{Color as CrosstermColor, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::ResetColor,
     terminal::{
         Clear as ClearTerminal, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
         disable_raw_mode, enable_raw_mode,
@@ -21,7 +21,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -75,8 +75,6 @@ impl TerminalGuard {
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
-            SetBackgroundColor(CrosstermColor::Black),
-            SetForegroundColor(CrosstermColor::White),
             ClearTerminal(ClearType::All),
             Hide
         ) {
@@ -301,7 +299,6 @@ fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect) {
     let selected = index == app.selected;
-    let border_color = if selected { Color::White } else { Color::Gray };
     let marker = if feed.paused { " PAUSED" } else { "" };
     let display_name = if feed.automatic_name {
         feed.metadata
@@ -317,7 +314,7 @@ fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect
     let source_badge = source_badge(feed);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color).add_modifier(if selected {
+        .border_style(chrome().add_modifier(if selected {
             Modifier::BOLD
         } else {
             Modifier::empty()
@@ -562,7 +559,7 @@ fn source_badge(feed: &Feed) -> String {
 }
 
 fn chrome() -> Style {
-    Style::default().fg(Color::White).bg(Color::Black)
+    Style::default()
 }
 
 fn status_label(status: &SourceStatus, fps: f32) -> String {

@@ -43,14 +43,14 @@ impl VideoWidget<'_> {
                 let rgb = self.frame.pixel(source_x, source_y);
                 let luminance = luminance(rgb);
                 let index = usize::from(luminance) * (ramp.len() - 1) / 255;
-                let foreground = if self.color {
-                    rgb_color(rgb)
+                let style = if self.color {
+                    Style::default().fg(rgb_color(rgb))
                 } else {
-                    Color::White
+                    Style::default()
                 };
                 buffer[(area.x + col, area.y + row)]
                     .set_char(ramp[index])
-                    .set_style(Style::default().fg(foreground).bg(Color::Black));
+                    .set_style(style);
             }
         }
     }

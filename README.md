@@ -13,7 +13,7 @@ account, server, telemetry, recording, or bundled camera directory.
 - Lets you paste and name feeds without leaving the viewer
 - Accepts HLS, RTSP, HTTP video, MJPEG, local video files, and USB webcams
 - Offers detailed Unicode half-blocks and classic ASCII rendering
-- Keeps the terminal chrome black with white text; video art can use true color
+- Inherits the terminal's foreground and background palette; video art can use true color
 - Supports color video and monochrome output
 - Reconnects interrupted sources with bounded backoff
 - Resizes dynamically with the terminal
