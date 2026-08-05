@@ -229,7 +229,6 @@ fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let renderer = match app.config.ui.renderer {
         Renderer::Ascii => "ASCII",
-        Renderer::Blocks if uses_background_cells() => "CELLS",
         Renderer::Blocks => "BLOCKS",
     };
     let color = if app.config.ui.color { "COLOR" } else { "MONO" };
@@ -335,7 +334,6 @@ fn draw_feed(frame: &mut Frame, app: &App, feed: &Feed, index: usize, area: Rect
                 renderer: app.config.ui.renderer,
                 color: app.config.ui.color,
                 ramp: &app.config.ui.ascii_ramp,
-                background_cells: uses_background_cells(),
             },
             inner,
         );
@@ -565,11 +563,6 @@ fn source_badge(feed: &Feed) -> String {
 
 fn chrome() -> Style {
     Style::default().fg(Color::White).bg(Color::Black)
-}
-
-fn uses_background_cells() -> bool {
-    std::env::var("TERM").is_ok_and(|value| value.contains("ghostty"))
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
 }
 
 fn status_label(status: &SourceStatus, fps: f32) -> String {
