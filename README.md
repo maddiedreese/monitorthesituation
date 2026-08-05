@@ -2,6 +2,8 @@
 
 Monitor any situation you want, directly from your terminal, through video feeds rendered in ASCII.
 
+![Six live video feeds rendered as a color terminal wall](assets/monitorthesituation-demo.png)
+
 `monitorthesituation` runs entirely inside your existing terminal. It opens an
 alternate screen, arranges your feeds into an adaptive grid, and restores the
 terminal exactly as it found it when you quit. There is no desktop window,
