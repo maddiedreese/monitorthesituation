@@ -12,6 +12,7 @@ pub struct VideoWidget<'a> {
     pub renderer: Renderer,
     pub color: bool,
     pub ramp: &'a str,
+    pub background_cells: bool,
 }
 
 impl Widget for VideoWidget<'_> {
@@ -21,12 +22,39 @@ impl Widget for VideoWidget<'_> {
         }
         match self.renderer {
             Renderer::Ascii => self.render_ascii(area, buffer),
+            Renderer::Blocks if self.background_cells => self.render_background_cells(area, buffer),
             Renderer::Blocks => self.render_blocks(area, buffer),
         }
     }
 }
 
 impl VideoWidget<'_> {
+    fn render_background_cells(&self, area: Rect, buffer: &mut Buffer) {
+        let crop = cover_crop(
+            self.frame.width,
+            self.frame.height,
+            area.width,
+            area.height,
+            2.0,
+        );
+        for row in 0..area.height {
+            for col in 0..area.width {
+                let rgb = self.frame.pixel(
+                    crop_coord(col, area.width, crop.x, crop.width, self.frame.width),
+                    crop_coord(row, area.height, crop.y, crop.height, self.frame.height),
+                );
+                let background = if self.color {
+                    rgb_color(rgb)
+                } else {
+                    gray_color(luminance(rgb))
+                };
+                buffer[(area.x + col, area.y + row)]
+                    .set_char(' ')
+                    .set_style(Style::default().bg(background));
+            }
+        }
+    }
+
     fn render_ascii(&self, area: Rect, buffer: &mut Buffer) {
         let ramp: Vec<char> = self.ramp.chars().collect();
         let crop = cover_crop(
@@ -176,6 +204,8 @@ fn gray_color(value: u8) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Instant};
+
     use super::*;
 
     #[test]
@@ -197,5 +227,29 @@ mod tests {
         assert_eq!(crop.width, 192.0);
         assert!(crop.y > 0.0);
         assert!(crop.height < 108.0);
+    }
+
+    #[test]
+    fn background_cell_mode_avoids_foreground_glyphs() {
+        let frame = VideoFrame {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([12, 34, 56]),
+            sequence: 1,
+            received_at: Instant::now(),
+        };
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buffer = Buffer::empty(area);
+        VideoWidget {
+            frame: &frame,
+            renderer: Renderer::Blocks,
+            color: true,
+            ramp: " .",
+            background_cells: true,
+        }
+        .render(area, &mut buffer);
+
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(12, 34, 56));
     }
 }
