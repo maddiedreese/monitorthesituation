@@ -40,7 +40,7 @@ enum Commands {
         /// Number of panes shown on one page (1–36)
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=36))]
         max_panes: Option<u8>,
-        /// Ad-hoc stream URLs or local media paths
+        /// Stream URLs, YouTube page URLs, or local media paths
         inputs: Vec<String>,
     },
     /// Create a documented starter configuration
@@ -203,6 +203,11 @@ fn doctor() -> Result<()> {
     println!("✓ ffmpeg available");
     media::ensure_ffprobe()?;
     println!("✓ ffprobe available");
+    if media::ytdlp_available() {
+        println!("✓ yt-dlp available (YouTube page URLs enabled)");
+    } else {
+        println!("· yt-dlp not found (YouTube page URLs disabled)");
+    }
 
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         println!("✓ interactive terminal detected");

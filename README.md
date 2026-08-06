@@ -23,6 +23,7 @@ account, server, telemetry, recording, or bundled camera directory.
 - Shows six feeds per page by default, with configurable paging for larger walls
 - Keeps credentials out of configuration through environment variables
 - Decodes everything locally through FFmpeg
+- Resolves supported YouTube pages through a separately installed `yt-dlp`
 - Shows sanitized source, protocol, codec, format, resolution, and frame-rate details
 
 ## Requirements
@@ -30,6 +31,7 @@ account, server, telemetry, recording, or bundled camera directory.
 - A reasonably modern terminal emulator
 - [FFmpeg](https://ffmpeg.org/) (`ffmpeg` and `ffprobe` on `PATH`)
 - Rust 1.85 or newer when installing from source
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` for optional YouTube page URLs
 
 Install FFmpeg on common platforms:
 
@@ -42,6 +44,17 @@ sudo apt install ffmpeg
 
 # Windows
 winget install Gyan.FFmpeg
+```
+
+YouTube page support is optional. Install `yt-dlp` separately if you want to
+paste a YouTube watch, live, short, or embed URL into the viewer:
+
+```sh
+# macOS
+brew install yt-dlp
+
+# Python/pipx
+pipx install yt-dlp
 ```
 
 ## Install
@@ -69,8 +82,15 @@ Press `a`, enter `Location name | URL`, and press Enter. The location becomes
 the pane title. Entering a URL by itself also works: the viewer uses an embedded
 location or title when the stream provides one, then falls back to its hostname.
 Press `a` again to add another feed, and the viewer rearranges the panes. URLs may be
-HLS (`.m3u8`), RTSP, direct HTTP video, or MJPEG streams. A webpage containing a
-video player is not itself a stream URL.
+HLS (`.m3u8`), RTSP, direct HTTP video, MJPEG streams, or supported YouTube pages
+when `yt-dlp` is installed. YouTube page URLs are resolved to one temporary media
+URL and then decoded locally through FFmpeg:
+
+```sh
+monitorthesituation run 'https://www.youtube.com/watch?v=VIDEO_ID'
+```
+
+Other webpages containing video players are not themselves stream URLs.
 
 Open one or more authorized streams directly:
 
@@ -189,21 +209,25 @@ See [docs/TERMINALS.md](docs/TERMINALS.md) for compatibility details.
 ## Source responsibility
 
 `monitorthesituation` does not discover, scrape, bypass, bundle, archive, or
-redistribute third-party feeds. Only connect to sources you own or are allowed
-to view through a direct media URL. In particular, a public webpage containing
-a video player does not necessarily authorize extracting its underlying stream.
+redistribute third-party feeds. YouTube page support is an explicit exception
+for a separately installed `yt-dlp` helper: the application invokes it without
+shell evaluation, browser cookies, or a bundled extractor, uses one returned
+media URL, and passes that URL directly to FFmpeg. Only connect to sources you
+are allowed to view and follow the source platform's rules; a public page does
+not by itself authorize bypassing access controls or downloading content.
 
 Demo footage and screenshots published by this project require documented
 permission from the camera operator. See [docs/CAMERA_PERMISSION.md](docs/CAMERA_PERMISSION.md).
 
 ## Privacy
 
-Frames move directly from FFmpeg into terminal memory. FFprobe reads technical
-stream metadata from the same source for the information panel. The application
-does not record frames, write them to disk, inspect their contents, or send them
-elsewhere. Pausing a pane freezes its latest in-memory frame while decoding
-continues. Source locations shown in the interface omit URL credentials, paths,
-query strings, and fragments.
+For YouTube pages, `yt-dlp` first resolves the page to a temporary media URL;
+frames then move directly from FFmpeg into terminal memory. FFprobe reads
+technical stream metadata from the same source for the information panel. The
+application does not record frames, write them to disk, inspect their contents,
+or send them elsewhere. Pausing a pane freezes its latest in-memory frame while
+decoding continues. Source locations shown in the interface omit URL
+credentials, paths, query strings, and fragments.
 
 ## Development
 
