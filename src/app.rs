@@ -144,7 +144,7 @@ impl App {
             .unwrap_or((None, entered));
         let input = input.to_owned();
         if input.is_empty() {
-            self.source_error = Some("Paste a direct stream URL or local media path.".into());
+            self.source_error = Some("Paste a URL or local media path.".into());
             return;
         }
         if input.chars().count() > 4096 {

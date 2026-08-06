@@ -1,5 +1,5 @@
 use std::{
-    io::Read,
+    io::{self, Read},
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
@@ -17,6 +17,9 @@ use crate::config::{SourceConfig, SourceKind};
 
 pub const FRAME_WIDTH: u16 = 192;
 pub const FRAME_HEIGHT: u16 = 108;
+const YTDLP_BINARY: &str = "yt-dlp";
+const YTDLP_FORMAT: &str =
+    "best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/best";
 
 #[derive(Debug, Clone)]
 pub struct VideoFrame {
@@ -68,7 +71,7 @@ pub enum SourceStatus {
     Stopped,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedInput {
     pub input: String,
     pub input_args: Vec<String>,
@@ -201,6 +204,10 @@ pub fn ensure_ffprobe() -> Result<()> {
     ensure_binary("ffprobe")
 }
 
+pub fn ytdlp_available() -> bool {
+    binary_available(YTDLP_BINARY)
+}
+
 fn ensure_binary(name: &str) -> Result<()> {
     let status = Command::new(name)
         .arg("-version")
@@ -211,6 +218,15 @@ fn ensure_binary(name: &str) -> Result<()> {
         Ok(status) if status.success() => Ok(()),
         _ => bail!("{name} was not found; install FFmpeg and ensure `{name}` is on PATH"),
     }
+}
+
+fn binary_available(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub fn resolve_input(input: &str, kind: SourceKind) -> Result<ResolvedInput> {
@@ -261,8 +277,13 @@ pub fn resolve_input(input: &str, kind: SourceKind) -> Result<ResolvedInput> {
 
     let is_file =
         kind == SourceKind::File || (kind == SourceKind::Auto && Path::new(input).exists());
-    let is_http = input.starts_with("http://") || input.starts_with("https://");
-    let input_args = if input.starts_with("rtsp://") {
+    let resolved_input = if is_youtube_url(input) {
+        resolve_youtube_url(input)?
+    } else {
+        input.to_owned()
+    };
+    let is_http = resolved_input.starts_with("http://") || resolved_input.starts_with("https://");
+    let input_args = if resolved_input.starts_with("rtsp://") {
         vec![
             "-rtsp_transport".into(),
             "tcp".into(),
@@ -273,11 +294,102 @@ pub fn resolve_input(input: &str, kind: SourceKind) -> Result<ResolvedInput> {
         Vec::new()
     };
     Ok(ResolvedInput {
-        input: input.to_owned(),
+        input: resolved_input,
         input_args,
         reconnect: is_http,
         loop_file: is_file,
     })
+}
+
+fn is_youtube_url(input: &str) -> bool {
+    let Some((scheme, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "music.youtube.com"
+            | "youtu.be"
+            | "www.youtu.be"
+            | "youtube-nocookie.com"
+            | "www.youtube-nocookie.com"
+    )
+}
+
+fn resolve_youtube_url(input: &str) -> Result<String> {
+    let output = Command::new(YTDLP_BINARY)
+        .args([
+            "--ignore-config",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            "--no-progress",
+            "--socket-timeout",
+            "10",
+            "--retries",
+            "1",
+            "--fragment-retries",
+            "1",
+            "--extractor-retries",
+            "1",
+            "--format",
+            YTDLP_FORMAT,
+            "--get-url",
+            "--",
+            input,
+        ])
+        .output()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "YouTube page URLs require `yt-dlp` on PATH; install it from https://github.com/yt-dlp/yt-dlp"
+                )
+            } else {
+                anyhow::anyhow!(error).context("could not start yt-dlp")
+            }
+        })?;
+    if !output.status.success() {
+        bail!(
+            "yt-dlp could not resolve the YouTube page (status {})",
+            output.status
+        );
+    }
+    parse_resolved_youtube_url(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_resolved_youtube_url(output: &str) -> Result<String> {
+    let urls = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let Some(url) = urls.first().copied() else {
+        bail!("yt-dlp returned no playable media URL");
+    };
+    if urls.len() != 1 {
+        bail!("yt-dlp returned multiple media URLs; expected one combined video URL");
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("yt-dlp returned an unsupported media URL");
+    }
+    if url.chars().any(char::is_control) {
+        bail!("yt-dlp returned a media URL with control characters");
+    }
+    Ok(url.to_owned())
 }
 
 fn worker_loop(
@@ -286,7 +398,8 @@ fn worker_loop(
     sender: SyncSender<MediaEvent>,
     stop: Arc<AtomicBool>,
 ) {
-    let resolved = match resolve_input(&source.input, source.kind) {
+    let youtube_source = is_youtube_url(&source.input);
+    let mut resolved = match resolve_input(&source.input, source.kind) {
         Ok(value) => value,
         Err(error) => {
             let _ = sender.send(MediaEvent::Status(SourceStatus::Failed(error.to_string())));
@@ -295,6 +408,28 @@ fn worker_loop(
     };
     let mut attempt = 0_u32;
     while !stop.load(Ordering::Relaxed) {
+        if attempt > 0 && youtube_source {
+            match resolve_input(&source.input, source.kind) {
+                Ok(value) => resolved = value,
+                Err(error) => {
+                    if sender
+                        .send(MediaEvent::Status(SourceStatus::Failed(short_error(
+                            &error,
+                        ))))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    attempt = attempt.saturating_add(1);
+                    let delay = Duration::from_secs(u64::from(attempt.min(5)));
+                    let deadline = Instant::now() + delay;
+                    while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    continue;
+                }
+            }
+        }
         let status = if attempt == 0 {
             SourceStatus::Connecting
         } else {
@@ -465,6 +600,31 @@ mod tests {
         let result = resolve_input("https://example.com/live.m3u8", SourceKind::Auto).unwrap();
         assert!(result.reconnect);
         assert!(!result.loop_file);
+    }
+
+    #[test]
+    fn detects_supported_youtube_page_hosts() {
+        assert!(is_youtube_url("https://www.youtube.com/watch?v=abc"));
+        assert!(is_youtube_url("https://youtu.be/abc"));
+        assert!(is_youtube_url("https://music.youtube.com/watch?v=abc"));
+        assert!(!is_youtube_url("https://example.com/watch?v=abc"));
+        assert!(!is_youtube_url(
+            "https://youtube.com.evil.example/watch?v=abc"
+        ));
+    }
+
+    #[test]
+    fn parses_one_resolved_youtube_url() {
+        assert_eq!(
+            parse_resolved_youtube_url("\nhttps://video.example/stream.mp4?token=secret\n")
+                .unwrap(),
+            "https://video.example/stream.mp4?token=secret"
+        );
+        assert!(parse_resolved_youtube_url("").is_err());
+        assert!(
+            parse_resolved_youtube_url("https://a.example/one\nhttps://b.example/two").is_err()
+        );
+        assert!(parse_resolved_youtube_url("file:///tmp/video.mp4").is_err());
     }
 
     #[test]

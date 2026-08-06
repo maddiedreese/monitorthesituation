@@ -490,7 +490,7 @@ fn draw_source_entry(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(error, chrome())),
         Line::from(Span::styled(
-            "Enter add  ·  Esc cancel  ·  URL alone also works",
+            "Enter add  ·  Esc cancel  ·  YouTube pages require yt-dlp",
             chrome(),
         )),
     ];
